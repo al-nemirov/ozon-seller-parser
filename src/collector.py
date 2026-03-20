@@ -64,6 +64,9 @@ def scroll_and_collect(driver, config: ParserConfig) -> Set[str]:
             previous_height = new_height
 
         # Сбор ссылок из DOM
+        # ВНИМАНИЕ: CSS-селекторы зависят от вёрстки OZON.
+        # При изменении структуры страницы нужно обновить селекторы ниже.
+        # Актуальные классы: div.tile-root, a.tile-clickable-element
         try:
             soup = BeautifulSoup(driver.page_source, "html.parser")
             for item in soup.select("div.tile-root a.tile-clickable-element[href]"):

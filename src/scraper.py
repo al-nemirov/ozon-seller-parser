@@ -44,7 +44,7 @@ def extract_text(soup: BeautifulSoup, selectors: list, default: str = "Нет д
 def extract_description(soup: BeautifulSoup) -> str:
     """Извлечь полное описание из JSON-LD разметки."""
     try:
-        script_tag = soup.find("script", text=re.compile(r"@context"))
+        script_tag = soup.find("script", string=re.compile(r"@context"))
         if script_tag:
             json_data = json.loads(script_tag.string.strip())
             if "description" in json_data:
@@ -72,6 +72,13 @@ def extract_attribute(soup: BeautifulSoup, href_pattern: str) -> str:
 def parse_product(soup: BeautifulSoup, link: str) -> dict:
     """
     Извлечь все данные товара со страницы.
+
+    ВНИМАНИЕ: CSS-селекторы и data-widget атрибуты зависят от вёрстки OZON.
+    При изменении структуры страницы товара необходимо обновить:
+    - Селектор заголовка: div[data-widget="webProductHeading"] h1
+    - Селектор галереи:   div[data-widget="webGallery"] img
+    - Селектор атрибутов: div[data-widget="webShortCharacteristics"]
+    - JSON-LD разметку:   script с @context
 
     Args:
         soup: распаршенный HTML.
