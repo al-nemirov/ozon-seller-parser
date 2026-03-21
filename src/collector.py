@@ -7,17 +7,22 @@ Stage 1 — Сбор ссылок на товары.
 import logging
 import os
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Set
 
 from bs4 import BeautifulSoup
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 from .config import ParserConfig
-from .browser import create_driver
+from .browser import create_driver, fetch_page, FetchError
 
 logger = logging.getLogger(__name__)
 
@@ -118,17 +123,28 @@ def run_collector(config: ParserConfig) -> None:
     existing_links = load_existing_links(config.links_file)
     logger.info(f"Уже собрано ссылок: {len(existing_links)}")
 
+    # Счётчики ошибок для итогового отчёта
+    failure_reasons: Counter = Counter()
+
     driver = create_driver(config.chrome_path or None)
-    driver.implicitly_wait(config.implicit_wait)
 
     try:
         logger.info(f"Открытие: {config.seller_url}")
-        driver.get(config.seller_url)
+        fetch_page(driver, config.seller_url)
 
         # Ждём загрузки первых товаров
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.tile-root"))
-        )
+        try:
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.tile-root"))
+            )
+        except TimeoutException:
+            failure_reasons["selector_not_found"] += 1
+            logger.error(
+                "Таймаут: элемент div.tile-root не найден на странице продавца. "
+                "Возможно, изменилась вёрстка OZON или страница не загрузилась."
+            )
+            raise
+
         logger.info("Страница загружена, начинаю скроллинг...")
 
         # Сбор ссылок
@@ -139,12 +155,39 @@ def run_collector(config: ParserConfig) -> None:
         added = save_links(new_links, existing_links, config.links_file)
         total = len(existing_links)
 
+        # Итоговый отчёт
+        logger.info("=" * 60)
         logger.info(f"Добавлено новых: {added}")
         logger.info(f"Всего в файле: {total}")
+        if failure_reasons:
+            logger.info("Ошибки при сборе:")
+            for reason, count in failure_reasons.most_common():
+                logger.info(f"  {reason}: {count}")
+        logger.info("=" * 60)
+
+    except FetchError as e:
+        failure_reasons[e.reason] += 1
+        logger.error(
+            f"Не удалось загрузить страницу продавца: {config.seller_url} — "
+            f"причина: {e.reason}, попыток: {e.attempts}"
+        )
+        raise
+
+    except TimeoutException as e:
+        failure_reasons["timeout"] += 1
+        logger.error(f"Таймаут при загрузке страницы продавца: {e}")
+        raise
+
+    except WebDriverException as e:
+        failure_reasons["webdriver_error"] += 1
+        logger.error(f"WebDriver ошибка: {e}")
+        raise
 
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        failure_reasons["unexpected_error"] += 1
+        logger.error(f"Непредвиденная ошибка: {type(e).__name__}: {e}")
         raise
+
     finally:
         try:
             driver.quit()

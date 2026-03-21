@@ -9,13 +9,15 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
 from bs4 import BeautifulSoup
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from .config import ParserConfig
-from .browser import create_driver
+from .browser import create_driver, fetch_page, FetchError
 
 logger = logging.getLogger(__name__)
 
@@ -131,10 +133,11 @@ def run_scraper(config: ParserConfig) -> None:
     logger.info(f"Ссылок для обработки: {len(links)}")
 
     driver = create_driver(config.chrome_path or None)
-    driver.implicitly_wait(config.implicit_wait)
 
     success = 0
     errors = 0
+    # Счётчики причин ошибок для итогового отчёта
+    failure_reasons: Counter = Counter()
 
     try:
         with open(config.output_file, mode="w", encoding="utf-8", newline="") as csvfile:
@@ -143,20 +146,70 @@ def run_scraper(config: ParserConfig) -> None:
 
             for i, link in enumerate(links, 1):
                 try:
-                    driver.get(link)
-                    time.sleep(config.page_pause)
+                    page_source = fetch_page(driver, link, pause=config.page_pause)
 
-                    soup = BeautifulSoup(driver.page_source, "html.parser")
+                    soup = BeautifulSoup(page_source, "html.parser")
+
+                    # Проверяем, что страница не пустая
+                    if not soup.find("body") or len(soup.get_text(strip=True)) < 50:
+                        errors += 1
+                        reason = "empty_response"
+                        failure_reasons[reason] += 1
+                        logger.warning(
+                            f"[{i}/{len(links)}] Пустая страница: {link} "
+                            f"(причина: {reason})"
+                        )
+                        continue
+
                     row = parse_product(soup, link)
-                    writer.writerow(row)
 
+                    # Проверяем, удалось ли извлечь ключевые поля
+                    missing_fields = [
+                        k for k in ("Название", "Артикул")
+                        if row.get(k) in ("Нет данных", "Нет артикула", "")
+                    ]
+                    if missing_fields:
+                        logger.warning(
+                            f"[{i}/{len(links)}] Неполные данные для {link}: "
+                            f"отсутствуют {', '.join(missing_fields)}"
+                        )
+                        failure_reasons["missing_fields"] += 1
+
+                    writer.writerow(row)
                     success += 1
+
                     if i % 10 == 0 or i == len(links):
                         logger.info(f"[{i}/{len(links)}] Обработано: {success} | Ошибок: {errors}")
 
+                except FetchError as e:
+                    errors += 1
+                    failure_reasons[e.reason] += 1
+                    logger.warning(
+                        f"[{i}/{len(links)}] Ошибка загрузки: {link} — "
+                        f"причина: {e.reason}, попыток: {e.attempts} | {e.original}"
+                    )
+
+                except TimeoutException as e:
+                    errors += 1
+                    failure_reasons["timeout"] += 1
+                    logger.warning(
+                        f"[{i}/{len(links)}] Таймаут: {link} — {e}"
+                    )
+
+                except WebDriverException as e:
+                    errors += 1
+                    failure_reasons["webdriver_error"] += 1
+                    logger.warning(
+                        f"[{i}/{len(links)}] WebDriver ошибка: {link} — {e}"
+                    )
+
                 except Exception as e:
                     errors += 1
-                    logger.warning(f"[{i}/{len(links)}] Ошибка: {link} — {e}")
+                    failure_reasons["unexpected_error"] += 1
+                    logger.warning(
+                        f"[{i}/{len(links)}] Непредвиденная ошибка: {link} — "
+                        f"{type(e).__name__}: {e}"
+                    )
 
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
@@ -168,7 +221,12 @@ def run_scraper(config: ParserConfig) -> None:
         except Exception:
             pass
 
+    # Итоговый отчёт
     logger.info("=" * 60)
     logger.info(f"Готово! Успешно: {success} | Ошибок: {errors}")
+    if failure_reasons:
+        logger.info("Причины ошибок:")
+        for reason, count in failure_reasons.most_common():
+            logger.info(f"  {reason}: {count}")
     logger.info(f"Результат: {config.output_file}")
     logger.info("=" * 60)
